@@ -4,3 +4,7 @@
 *.avi
 clips/*
 *.log
+venv
+build
+dist
+*.spec

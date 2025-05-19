@@ -9,6 +9,14 @@ import threading
 from moviepy.editor import VideoFileClip, concatenate_videoclips
 from pathlib import Path
 
+# build commands to produce an .exe:  
+    #  cd /whereever/you/cloned/the/repo
+    #  python -m venv venv
+    #  venv\Scripts\activate
+    #  pip install -r requirements.txt
+    #  pyinstaller --onefile --console streamer-auto-editor.py
+
+
 class ClipExtractorApp:
     def __init__(self, root):
         self.root = root
