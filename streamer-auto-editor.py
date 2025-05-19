@@ -6,7 +6,7 @@ import os
 import subprocess
 from datetime import datetime, timedelta
 import threading
-from moviepy.editor import VideoFileClip, concatenate_videoclips, AudioFileClip, CompositeAudioClip
+from moviepy.editor import VideoFileClip, concatenate_videoclips
 from pathlib import Path
 
 class ClipExtractorApp:

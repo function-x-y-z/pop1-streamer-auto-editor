@@ -1,5 +1,6 @@
 numpy
 librosa
-moviepy
+moviepy==1.0.3
 art
 tqdm
+Pillow
