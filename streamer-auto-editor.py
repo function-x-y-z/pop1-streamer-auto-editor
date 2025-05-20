@@ -81,7 +81,8 @@ class ClipExtractorApp:
         self.outro_btn.pack(pady=5)
 
         ttk.Label(root, text="Time of First Kill (hh:mm:ss):").pack()
-        ttk.Label(root, text="This needs to be accurate to the second").pack()
+        ttk.Label(root, text="This needs to be accurate to the second, find the time when 'first blood' is said").pack()
+        ttk.Label(root, text="ALL the time calculations depend on this value.").pack()
         self.start_time_entry = ttk.Entry(root, width=20)
         self.start_time_entry.pack(pady=5)
 
