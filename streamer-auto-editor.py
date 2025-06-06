@@ -69,6 +69,18 @@ class ClipExtractorApp:
         self.log_btn = ttk.Button(input_frame, text="Select Log", command=self.load_log)
         self.log_btn.pack(pady=5)
 
+        self.fp_options_frame = ttk.LabelFrame(input_frame, text="First Person Video Options", padding=10)
+        self.fp_options_frame.pack(pady=5, fill="x", padx=10)
+        self.fp_options_frame.pack_forget()  # Hide initially
+
+        ttk.Label(self.fp_options_frame, text="First Person Video File (MP4/MKV):").pack()
+        self.fp_video_btn = ttk.Button(self.fp_options_frame, text="Select First Person Video", command=self.load_fp_video)
+        self.fp_video_btn.pack(pady=5)
+
+        ttk.Label(self.fp_options_frame, text="Time of First Kill in FP Video (hh:mm:ss):").pack()
+        self.fp_start_time_entry = ttk.Entry(self.fp_options_frame, width=20)
+        self.fp_start_time_entry.pack(pady=5)
+
         addon_frame = ttk.LabelFrame(top_frame, text="Optional Addon Videos", padding=10)
         addon_frame.grid(row=0, column=1, padx=10)
 
@@ -110,6 +122,27 @@ class ClipExtractorApp:
         after_slider = ttk.Scale(settings_frame, from_=0, to=10, orient=tk.HORIZONTAL,
                   variable=self.time_after, length=200, command=self.update_after_label)
         after_slider.pack()
+
+        # Move the combine_fp_var and checkbox into settings_frame
+        self.combine_fp_var = tk.BooleanVar(value=False)
+        self.combine_fp_chk = ttk.Checkbutton(
+            settings_frame,
+            text="Combine with first person video",
+            variable=self.combine_fp_var,
+            command=self.toggle_fp_options
+        )
+        self.combine_fp_chk.pack(pady=5)
+
+
+        self.fp_video_path = None
+
+        self.visible_to_caster_var = tk.BooleanVar(value=True)
+        self.visible_to_caster_chk = ttk.Checkbutton(
+            settings_frame,
+            text="kills visible to caster",
+            variable=self.visible_to_caster_var
+        )
+        self.visible_to_caster_chk.pack(pady=5)
 
         self.filter_frame = ttk.LabelFrame(top_frame, text="Filter by Player", padding=10)
         self.filter_frame.grid(row=1, column=0, columnspan=3, pady=10, sticky="ew")
@@ -183,7 +216,7 @@ class ClipExtractorApp:
             with open(self.log_path, "r", encoding="utf-8") as f:
                 self.events = [json.loads(line) for line in f if line.strip()]
 
-            # Extract unique players immediately
+            # Extract unique players
             self.unique_players.clear()
             for event in self.events:
                 if "Killer" in event:
@@ -195,7 +228,7 @@ class ClipExtractorApp:
                 widget.destroy()
             self.filter_vars = {}
 
-            num_columns = 5  # You can adjust the number of columns as needed
+            num_columns = 5
             row_num = 0
             col_num = 0
 
@@ -224,6 +257,18 @@ class ClipExtractorApp:
         if self.outro_path:
             self.outro_btn.config(text=os.path.basename(self.outro_path))
             self.log(f"Outro file selected: {self.outro_path}")
+
+    def toggle_fp_options(self):
+        if self.combine_fp_var.get():
+            self.fp_options_frame.pack(pady=5, fill="x", padx=10)
+        else:
+            self.fp_options_frame.pack_forget()
+
+    def load_fp_video(self):
+        self.fp_video_path = filedialog.askopenfilename(filetypes=[("Video files", "*.mp4 *.mkv")])
+        if self.fp_video_path:
+            self.fp_video_btn.config(text=os.path.basename(self.fp_video_path))
+            self.log(f"First person video selected: {self.fp_video_path}")
 
     def parse_log(self):
         with open(self.log_path, "r", encoding="utf-8") as f:
@@ -254,6 +299,28 @@ class ClipExtractorApp:
         )
         thread.start()
 
+    def create_side_by_side_clip(self, stream_path, fp_path, stream_start, duration, fp_start):
+        """
+        Returns a moviepy VideoClip with stream and first-person video side by side, both with audio.
+        """
+        stream_clip = VideoFileClip(stream_path).subclip(stream_start, stream_start + duration)
+        fp_clip = VideoFileClip(fp_path).subclip(fp_start, fp_start + duration)
+
+        # Resize to same height
+        min_height = min(stream_clip.h, fp_clip.h)
+        stream_clip = stream_clip.resize(height=min_height)
+        fp_clip = fp_clip.resize(height=min_height)
+
+        # Compose side by side
+        from moviepy.editor import clips_array, CompositeAudioClip
+
+        # Combine audio (both tracks)
+        combined_audio = CompositeAudioClip([stream_clip.audio, fp_clip.audio])
+
+        side_by_side = clips_array([[stream_clip, fp_clip]])
+        side_by_side = side_by_side.set_audio(combined_audio)
+
+        return side_by_side
 
     def generate_thumbnail(self, clip_path, thumb_path):
         cmd = [
@@ -311,9 +378,11 @@ class ClipExtractorApp:
         filtered_events = []
         selected_players = [player for player, var in self.filter_vars.items() if var.get()]
         for event in self.events:
+            visible_ok = True
+            if self.visible_to_caster_var.get():
+                visible_ok = event.get("KillerInView") and event.get("InView")
             if (
-                event.get("KillerInView") and
-                event.get("InView") and
+                visible_ok and
                 event.get("CameraDistance", 9999) <= self.distance_threshold.get()
             ):
                 killer = event.get("Killer", "Unknown")
@@ -361,7 +430,9 @@ class ClipExtractorApp:
         merged_clips.append(current)
 
         self.log(f"Total {len(merged_clips)} clips to generate...")
-
+        
+        self.clip_times = [(clip["start"], clip["end"]) for clip in merged_clips]
+        
         for i, clip in enumerate(merged_clips):
             start = clip["start"]
             end = clip["end"]
@@ -375,19 +446,42 @@ class ClipExtractorApp:
                 self.log(f"Skipping clip {i+1} with non-positive duration.")
                 continue
 
-            ffmpeg_cmd = [
-                "ffmpeg", "-y", "-ss", start_str, "-i", self.video_path,
-                "-t", str(duration), "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
-                "-c:a", "aac", "-b:a", "128k", clip_filename
-            ]
+            # --- New logic for side-by-side preview ---
+            combine_fp = self.combine_fp_var.get() and self.fp_video_path and self.fp_start_time_entry.get()
+            if combine_fp:
+                try:
+                    fp_first_kill_dt = datetime.strptime(self.fp_start_time_entry.get(), "%H:%M:%S")
+                    stream_start_dt = datetime.strptime(self.start_time_entry.get(), "%H:%M:%S")
+                    # Calculate offset from stream first kill
+                    stream_delta = (start - stream_start_dt).total_seconds()
+                    fp_clip_start = (fp_first_kill_dt + timedelta(seconds=stream_delta)).strftime("%H:%M:%S")
+                    # Convert to seconds for subclip
+                    h, m, s = map(int, start_str.split(":"))
+                    stream_sec = h * 3600 + m * 60 + s
+                    h, m, s = map(int, fp_clip_start.split(":"))
+                    fp_sec = h * 3600 + m * 60 + s
 
-
-            self.log(f"Extracting clip {i+1}: {start_str} +{duration:.2f}s {killers} → {killed} ")
-            proc = subprocess.run(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            if proc.returncode != 0:
-                self.log(f"Failed to extract clip {i+1}")
-                self.log(proc.stderr.decode())
-                continue
+                    # Create side-by-side preview and write to file
+                    side_by_side_clip = self.create_side_by_side_clip(
+                        self.video_path, self.fp_video_path, stream_sec, duration, fp_sec
+                    )
+                    side_by_side_clip.write_videofile(clip_filename, codec="libx264", audio_codec="aac", threads=2, preset="ultrafast", verbose=False, logger=None)
+                    side_by_side_clip.close()
+                except Exception as e:
+                    self.log(f"Failed to create side-by-side preview for clip {i+1}: {e}")
+                    continue
+            else:
+                ffmpeg_cmd = [
+                    "ffmpeg", "-y", "-ss", start_str, "-i", self.video_path,
+                    "-t", str(duration), "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                    "-c:a", "aac", "-b:a", "128k", clip_filename
+                ]
+                self.log(f"Extracting clip {i+1}: {start_str} +{duration:.2f}s {killers} → {killed} ")
+                proc = subprocess.run(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if proc.returncode != 0:
+                    self.log(f"Failed to extract clip {i+1}")
+                    self.log(proc.stderr.decode())
+                    continue
 
             self.clip_paths.append(clip_filename)
 
@@ -427,17 +521,84 @@ class ClipExtractorApp:
 
 
     def create_final_video(self, selected_clip_paths, output_path="final_output.mp4"):
-
         final_clips = []
 
         # Optional intro
         if self.intro_path and Path(self.intro_path).exists():
             final_clips.append(VideoFileClip(self.intro_path))
 
-        # Main selected clips
-        for path in selected_clip_paths:
-            if Path(path).exists():
-                final_clips.append(VideoFileClip(path))
+        combine_fp = self.combine_fp_var.get() and self.fp_video_path and self.fp_start_time_entry.get()
+        fp_video_path = self.fp_video_path
+        fp_first_kill_time = self.fp_start_time_entry.get()
+
+        if combine_fp:
+            # Parse first kill time in FP video
+            try:
+                fp_first_kill_dt = datetime.strptime(fp_first_kill_time, "%H:%M:%S")
+            except Exception:
+                self.log("Invalid first kill time for FP video. Use hh:mm:ss.")
+                self.final_btn.config(state="normal")
+                self.process_btn.config(state="normal")
+                return
+
+            # Find first kill event time in stream
+            if not self.events:
+                self.log("No events loaded for synchronization.")
+                return
+            first_kill_event = next((e for e in self.events), None)
+            if not first_kill_event:
+                self.log("No valid kill events found in log file.")
+                return
+            stream_first_kill_dt = datetime.fromisoformat(first_kill_event["TimeStamp"].replace("Z", "+00:00"))
+            stream_start_time = self.start_time_entry.get()
+            try:
+                stream_start_dt = datetime.strptime(stream_start_time, "%H:%M:%S")
+            except Exception:
+                self.log("Invalid stream start time. Use hh:mm:ss.")
+                return
+
+            # Calculate offset between stream and FP video
+            # For each clip, calculate the start time in both videos
+            for chk_var, path, killers, killed_list, frame in self.clip_checks:
+                if not chk_var.get():
+                    continue
+                # Extract start time from filename or metadata
+                # We'll need to store start/end times in self.clip_checks or elsewhere
+                # For now, let's assume you have a parallel list self.clip_times = [(start, end), ...]
+                # If not, you should store start/end with each clip in self.clip_checks
+
+                # Let's assume you have self.clip_times = [(start, end), ...] in the same order as self.clip_checks
+                # If not, you need to adjust this logic to get the correct start/end for each clip
+
+                # For demonstration, let's use the clip filename index to get times
+                idx = int(os.path.splitext(os.path.basename(path))[0].split("_")[-1]) - 1
+                start, end = self.clip_times[idx]
+                duration = (end - start).total_seconds()
+                stream_clip_start = start.strftime("%H:%M:%S")
+
+                # Calculate offset from stream first kill
+                stream_delta = (start - stream_start_dt).total_seconds()
+                fp_clip_start = (fp_first_kill_dt + timedelta(seconds=stream_delta)).strftime("%H:%M:%S")
+
+                # Convert to seconds for subclip
+                h, m, s = map(int, stream_clip_start.split(":"))
+                stream_sec = h * 3600 + m * 60 + s
+                h, m, s = map(int, fp_clip_start.split(":"))
+                fp_sec = h * 3600 + m * 60 + s
+
+                try:
+                    side_by_side_clip = self.create_side_by_side_clip(
+                        self.video_path, fp_video_path, stream_sec, duration, fp_sec
+                    )
+                    final_clips.append(side_by_side_clip)
+                except Exception as e:
+                    self.log(f"Failed to create side-by-side clip: {e}")
+
+        else:
+            # Main selected clips (original behavior)
+            for path in selected_clip_paths:
+                if Path(path).exists():
+                    final_clips.append(VideoFileClip(path))
 
         # Optional outro
         if self.outro_path and Path(self.outro_path).exists():
@@ -448,7 +609,7 @@ class ClipExtractorApp:
             self.log("No valid clips to concatenate.")
             return
 
-        self.log(f"Generating final video: stitching ${len(selected_clip_paths)} clips together.")
+        self.log(f"Generating final video: stitching {len(final_clips)} clips together.")
 
         final_video = concatenate_videoclips(final_clips, method="compose")
 
@@ -468,7 +629,6 @@ class ClipExtractorApp:
         self.final_btn.config(state="normal")
         self.process_btn.config(state="normal")
         self.log(f"Edited video generation complete: {output_path}")
-
     def apply_filters(self):
         active_players = {p for p, v in self.filter_vars.items() if v.get()}
 
